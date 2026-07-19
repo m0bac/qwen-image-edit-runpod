@@ -1,4 +1,4 @@
-name: Build private Qwen Pod image
+name: Build Qwen Pod image
 
 on:
   push:
@@ -16,6 +16,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space for the ComfyUI base image
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune --all --force
+          df -h /
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -29,5 +34,3 @@ jobs:
           file: pod/Dockerfile
           push: true
           tags: ghcr.io/m0bac/qwen-image-edit-pod:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
