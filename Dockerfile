@@ -18,3 +18,8 @@ RUN comfy model download \
   --url https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors \
   --relative-path models/vae \
   --filename qwen_image_vae.safetensors
+
+RUN comfy model download \
+  --url https://huggingface.co/prithivMLmods/Qwen-Image-Edit-2511-Hyper-Realistic-Portrait/resolve/main/HRP_20.safetensors \
+  --relative-path models/loras \
+  --filename HRP_20.safetensors
