@@ -32,7 +32,12 @@ if os.path.exists(target) and os.path.getsize(target) > 0:
 
 print(f"Downloading {label} to persistent storage...")
 part = f"{target}.part"
-request = urllib.request.Request(url, headers={"User-Agent": "qwen-pod/1.0"})
+headers = {"User-Agent": "qwen-pod/1.0"}
+if "civitai.com" in url or "civitai.red" in url:
+    token = os.environ.get("CIVITAI_API_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+request = urllib.request.Request(url, headers=headers)
 with urllib.request.urlopen(request, timeout=60) as response, open(part, "wb") as output:
     expected = int(response.headers.get("Content-Length") or 0)
     downloaded = 0
