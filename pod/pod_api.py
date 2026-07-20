@@ -13,6 +13,7 @@ from pydantic import BaseModel
 COMFY = "http://127.0.0.1:8188"
 INPUT_DIR = Path("/comfyui/input")
 ACCESS_TOKEN = os.environ.get("POD_ACCESS_TOKEN", "")
+PROGRESS_FILE = Path("/workspace/qwen-image-edit-models/startup-progress.json")
 
 app = FastAPI(title="Private Qwen ComfyUI Pod API")
 
@@ -36,6 +37,13 @@ def comfy_json(path: str, method: str = "GET", payload=None):
         return json.loads(response.read())
 
 
+def startup_status():
+    try:
+        return json.loads(PROGRESS_FILE.read_text())
+    except Exception:
+        return {"stage": "initializing", "label": "Starting the Pod", "percent": 0}
+
+
 class InputImage(BaseModel):
     name: str
     image: str
@@ -48,12 +56,19 @@ class JobRequest(BaseModel):
 
 @app.get("/health", dependencies=[Depends(require_token)])
 def health():
-    stats = comfy_json("/system_stats")
-    return {"ready": True, "comfy": bool(stats)}
+    progress = startup_status()
+    return {"ready": progress.get("stage") == "ready", "startup": progress}
+
+
+@app.get("/startup", dependencies=[Depends(require_token)])
+def startup():
+    return startup_status()
 
 
 @app.post("/jobs", dependencies=[Depends(require_token)])
 def create_job(request: JobRequest):
+    if startup_status().get("stage") != "ready":
+        raise HTTPException(503, "Models are still loading")
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
     for item in request.images:
         name = Path(item.name).name
