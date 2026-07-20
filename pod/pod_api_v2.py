@@ -21,7 +21,7 @@ JOB_PROGRESS: dict[str, int] = {}
 JOB_ERRORS: dict[str, str] = {}
 PROGRESS_LOCK = threading.Lock()
 
-app = FastAPI(title="Private Qwen ComfyUI Pod API")
+app = FastAPI(title="Private Photo and Video ComfyUI Pod API")
 
 
 def require_token(authorization: str | None = Header(default=None)):
@@ -173,18 +173,29 @@ def get_job(job_id: str):
             messages = status.get("messages", [])
             return {"status": "failed", "error": str(messages[-1] if messages else "ComfyUI job failed")[:500], "progress": progress}
         for output in job.get("outputs", {}).values():
-            images = output.get("images", [])
-            if images:
-                image = images[0]
+            for media_key in ("videos", "video", "gifs", "images", "files"):
+                media_items = output.get(media_key, [])
+                if isinstance(media_items, dict):
+                    media_items = [media_items]
+                if not media_items:
+                    continue
+                media = media_items[0]
+                if not isinstance(media, dict) or not media.get("filename"):
+                    continue
                 query = urllib.parse.urlencode({
-                    "filename": image["filename"],
-                    "subfolder": image.get("subfolder", ""),
-                    "type": image.get("type", "output"),
+                    "filename": media["filename"],
+                    "subfolder": media.get("subfolder", ""),
+                    "type": media.get("type", "output"),
                 })
                 with urllib.request.urlopen(f"{COMFY}/view?{query}", timeout=60) as response:
-                    encoded = base64.b64encode(response.read()).decode()
-                    mime = response.headers.get_content_type() or "image/png"
-                return {"status": "completed", "result": f"data:{mime};base64,{encoded}", "progress": 100}
+                    raw = response.read()
+                    encoded = base64.b64encode(raw).decode()
+                    mime = response.headers.get_content_type()
+                if not mime or mime == "application/octet-stream":
+                    suffix = Path(media["filename"]).suffix.lower()
+                    mime = {".mp4": "video/mp4", ".webm": "video/webm", ".webp": "image/webp", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(suffix, "image/png")
+                kind = "video" if mime.startswith("video/") else "image"
+                return {"status": "completed", "result": f"data:{mime};base64,{encoded}", "mediaType": kind, "filename": media["filename"], "progress": 100}
 
     queue = comfy_json("/queue")
     if any(job_id in json.dumps(item) for item in queue.get("queue_running", [])):
