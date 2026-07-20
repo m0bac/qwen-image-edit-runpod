@@ -2,7 +2,7 @@ FROM runpod/worker-comfyui:5.8.6-base
 
 RUN uv pip install --no-cache-dir fastapi uvicorn python-multipart websocket-client
 
-COPY pod/start-pod-v2.sh /start-pod.sh
+COPY pod/start-pod-v3.sh /start-pod.sh
 COPY pod/pod_api_v2.py /pod_api_base.py
 COPY pod/pod_api_extensions.py /pod_api.py
 COPY pod/download_models.py /download_models.py
