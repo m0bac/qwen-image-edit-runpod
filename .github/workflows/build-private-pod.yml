@@ -35,6 +35,6 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: pod/Dockerfile.progress
+          file: pod/Dockerfile.loras
           push: true
           tags: ghcr.io/m0bac/qwen-image-edit-pod:latest
