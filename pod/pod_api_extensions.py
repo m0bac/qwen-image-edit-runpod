@@ -2,7 +2,7 @@ import os
 for key in ("NO_PROXY", "no_proxy"):
     os.environ[key] = ",".join(dict.fromkeys(filter(None, os.environ.get(key, "").split(",") + ["127.0.0.1", "localhost"])))
 
-import re, threading, urllib.parse, urllib.request, uuid
+import re, threading, time, urllib.parse, urllib.request, uuid
 from pathlib import Path
 import websocket
 from fastapi import Depends, HTTPException
@@ -88,17 +88,23 @@ VIDEO_MODEL_ROOT = Path("/workspace/qwen-image-edit-models")
 VIDEO_MODEL_TASKS, VIDEO_MODEL_LOCK = {}, threading.Lock()
 WAN_MODEL_ID = "wan-2.2-ti2v-5b"
 WAN_MODEL_FILES = (
-    ("diffusion_models", "wan2.2_ti2v_5B_fp16.safetensors", "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors"),
-    ("text_encoders", "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
-    ("vae", "wan2.2_vae.safetensors", "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan2.2_vae.safetensors"),
+    ("diffusion_models", "wan2.2_ti2v_5B_fp16.safetensors", 9_999_658_848, "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors"),
+    ("text_encoders", "umt5_xxl_fp8_e4m3fn_scaled.safetensors", 6_735_906_897, "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
+    ("vae", "wan2.2_vae.safetensors", 1_409_400_960, "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan2.2_vae.safetensors"),
 )
 
+def model_file_ready(folder, name, expected_size):
+    path = VIDEO_MODEL_ROOT / folder / name
+    return path.exists() and path.stat().st_size == expected_size
+
 def wan_model_ready():
-    return all((VIDEO_MODEL_ROOT / folder / name).exists() and (VIDEO_MODEL_ROOT / folder / name).stat().st_size > 1024 for folder, name, _ in WAN_MODEL_FILES)
+    return all(model_file_ready(folder, name, expected_size) for folder, name, expected_size, _ in WAN_MODEL_FILES)
 
 def link_video_model_files():
-    for folder, name, _ in WAN_MODEL_FILES:
+    for folder, name, expected_size, _ in WAN_MODEL_FILES:
         source = VIDEO_MODEL_ROOT / folder / name
+        if not model_file_ready(folder, name, expected_size):
+            continue
         destination_dir = Path("/comfyui/models") / folder
         destination_dir.mkdir(parents=True, exist_ok=True)
         destination = destination_dir / name
@@ -106,34 +112,68 @@ def link_video_model_files():
             destination.unlink()
         destination.symlink_to(source)
 
+def download_model_file(task_id, index, count, folder, name, expected_size, url):
+    target_dir = VIDEO_MODEL_ROOT / folder
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / name
+    part = target.with_suffix(target.suffix + ".part")
+    if target.exists() and target.stat().st_size != expected_size:
+        if target.stat().st_size < expected_size and not part.exists():
+            os.replace(target, part)
+        else:
+            target.unlink()
+    if part.exists() and part.stat().st_size > expected_size:
+        part.unlink()
+    total_bundle_size = sum(item[2] for item in WAN_MODEL_FILES)
+    completed_before = sum(item[2] for item in WAN_MODEL_FILES[:index])
+
+    for attempt in range(1, 7):
+        downloaded = part.stat().st_size if part.exists() else 0
+        headers = {"User-Agent": "ComfyUI-Photo-Runner/1.0"}
+        if downloaded:
+            headers["Range"] = f"bytes={downloaded}-"
+        try:
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=180) as source:
+                if downloaded and source.status != 206:
+                    part.unlink(missing_ok=True)
+                    downloaded = 0
+                mode = "ab" if downloaded else "wb"
+                with open(part, mode) as output:
+                    while True:
+                        chunk = source.read(8 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                        downloaded += len(chunk)
+                        overall = round((completed_before + min(downloaded, expected_size)) / total_bundle_size * 100)
+                        with VIDEO_MODEL_LOCK:
+                            VIDEO_MODEL_TASKS[task_id].update(
+                                status="downloading", file=name, progress=overall,
+                                bytesDownloaded=completed_before + min(downloaded, expected_size),
+                                bytesTotal=total_bundle_size,
+                            )
+            if part.stat().st_size == expected_size:
+                os.replace(part, target)
+                return
+            if part.stat().st_size > expected_size:
+                part.unlink()
+                raise ValueError(f"{name} exceeded its expected size")
+        except Exception:
+            if attempt == 6:
+                raise
+            time.sleep(min(attempt * 2, 10))
+    raise ValueError(f"{name} did not download completely")
+
 def download_video_model_bundle(task_id):
     try:
         count = len(WAN_MODEL_FILES)
-        for index, (folder, name, url) in enumerate(WAN_MODEL_FILES):
-            target_dir = VIDEO_MODEL_ROOT / folder
-            target_dir.mkdir(parents=True, exist_ok=True)
-            target = target_dir / name
-            if target.exists() and target.stat().st_size > 1024:
+        for index, (folder, name, expected_size, url) in enumerate(WAN_MODEL_FILES):
+            if model_file_ready(folder, name, expected_size):
                 with VIDEO_MODEL_LOCK:
                     VIDEO_MODEL_TASKS[task_id].update(file=name, progress=round((index + 1) / count * 100))
                 continue
-            part = target.with_suffix(target.suffix + ".part")
-            request = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-Photo-Runner/1.0"})
-            with urllib.request.urlopen(request, timeout=90) as source, open(part, "wb") as output:
-                total, current = int(source.headers.get("Content-Length") or 0), 0
-                while True:
-                    chunk = source.read(8 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    output.write(chunk)
-                    current += len(chunk)
-                    file_progress = (current / total * 100) if total else 0
-                    overall = round((index + file_progress / 100) / count * 100)
-                    with VIDEO_MODEL_LOCK:
-                        VIDEO_MODEL_TASKS[task_id].update(status="downloading", file=name, progress=overall)
-            if part.stat().st_size < 1024:
-                raise ValueError(f"{name} did not download correctly")
-            os.replace(part, target)
+            download_model_file(task_id, index, count, folder, name, expected_size, url)
         link_video_model_files()
         with VIDEO_MODEL_LOCK:
             VIDEO_MODEL_TASKS[task_id].update(status="ready", file="", progress=100)
@@ -148,6 +188,8 @@ def list_video_models():
         link_video_model_files()
     with VIDEO_MODEL_LOCK:
         task = dict(VIDEO_MODEL_TASKS.get(WAN_MODEL_ID, {}))
+    if task.get("status") == "ready" and not ready:
+        task = {**task, "status": "not_installed", "progress": 0, "error": "Wan download is incomplete. Select Download Wan again to resume it."}
     wan_status = task or {
         "id": WAN_MODEL_ID,
         "title": "Wan 2.2 TI2V-5B",
