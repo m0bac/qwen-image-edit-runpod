@@ -3,6 +3,7 @@ import json
 import os
 import re
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -39,8 +40,37 @@ def comfy_json(path: str, method: str = "GET", payload=None):
         method=method,
         headers={"Content-Type": "application/json"} if data else {},
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(body)
+        except json.JSONDecodeError:
+            detail = body
+        if isinstance(detail, dict):
+            node_errors = detail.get("node_errors")
+            if isinstance(node_errors, dict) and node_errors:
+                messages = []
+                for node_id, node_error in node_errors.items():
+                    errors = node_error.get("errors", []) if isinstance(node_error, dict) else []
+                    for item in errors:
+                        if not isinstance(item, dict):
+                            continue
+                        message = item.get("message") or item.get("details")
+                        if message:
+                            messages.append(f"Node {node_id}: {message}")
+                if messages:
+                    raise HTTPException(422, "; ".join(messages)[:500]) from error
+            comfy_error = detail.get("error")
+            if isinstance(comfy_error, dict):
+                message = comfy_error.get("message") or comfy_error.get("type")
+                if message:
+                    raise HTTPException(422, f"ComfyUI rejected the workflow: {message}"[:500]) from error
+            if isinstance(comfy_error, str) and comfy_error:
+                raise HTTPException(422, comfy_error[:500]) from error
+        raise HTTPException(502, f"ComfyUI returned HTTP {error.code}: {str(detail)[:400]}") from error
 
 
 def startup_status():
